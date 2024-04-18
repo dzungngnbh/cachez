@@ -1,0 +1,10 @@
+[package]
+name = "cachez"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+t1ha = "0.1.2"
+mimalloc = "0.1.25"
+bit-vec = "0.6.3"
+fastrand = "2.0.2"
