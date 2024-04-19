@@ -12,22 +12,84 @@ const VEC_GROWTH_CAP: usize = 65536;
 type Weight = u16;
 type Key = u64;
 
+const USES_CAP: u8 = 3;
 /// Cache entry holds its data and metadata
 struct Entry<T> {
+    /// We limit uses to 3, TODO: find better implementation bit vector to fit 3
     uses: AtomicU8,
     queue: AtomicBool, // 0: small, 1: main
-    weight: Weight,
+    eight: Weight,
     data: T,
+}
+
+impl<T> Entry<T> {
+    // Uses ----------------------------------------
+    /// Increment the uses counter, return the new value
+    pub(crate) fn incr_uses(&self) -> u8 {
+        loop {
+            let uses = self.uses();
+            if uses >= USES_CAP {
+                return uses;
+            }
+
+            if let Err(new_uses) = self.uses.compare_exchange(
+                uses,
+                uses + 1,
+                atomic::Ordering::Relaxed,
+                atomic::Ordering::Relaxed,
+            ) {
+                // someone else updated the uses
+                if new_uses >= USES_CAP {
+                    return new_uses;
+                } // else retry
+            } else {
+                return uses + 1;
+            }
+        }
+    }
+
+    /// Decrement the uses counter, return the previous value
+    pub(crate) fn decr_uses(&self) -> u8 {
+        loop {
+            let uses = self.uses();
+            if uses == 0 {
+                return uses;
+            }
+
+            if let Err(new_uses) = self.uses.compare_exchange(
+                uses,
+                uses - 1,
+                atomic::Ordering::Relaxed,
+                atomic::Ordering::Relaxed,
+            ) {
+                // someone else updated the uses
+                if new_uses == 0 {
+                    return new_uses;
+                } // else retry
+            } else {
+                return uses;
+            }
+        }
+    }
+
+    /// Get the uses counter
+    pub(crate) fn uses(&self) -> u8 {
+        self.uses.load(atomic::Ordering::Relaxed)
+    }
 }
 
 // Experiment: We use S3FiFo https://s3fifo.com/ for admission policy
 // TODO: Double check with your own queue performance
 struct FifoQueues {
-    small: VecDeque<u64>,
+    pub small: VecDeque<u64>,
     small_weight: u16,
 
     main: VecDeque<u64>,
     main_weight: u16,
+}
+
+impl FifoQueues {
+    pub(crate) fn admit(&mut self, key: Key, weight: Weight) {}
 }
 
 /// TinyLFU cache
