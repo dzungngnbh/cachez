@@ -1,13 +1,34 @@
 use crate::tinylfu::estimator::Estimator;
+use std::collections::VecDeque;
 use std::hash::BuildHasher;
 use std::sync::atomic;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize};
 use t1ha::T1haHashMap;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const VEC_GROWTH_CAP: usize = 65536;
+type Weight = u16;
+type Key = u64;
+
+/// Cache entry holds its data and metadata
+struct Entry<T> {
+    uses: AtomicU8,
+    queue: AtomicBool, // 0: small, 1: main
+    weight: Weight,
+    data: T,
+}
+
+// Experiment: We use S3FiFo https://s3fifo.com/ for admission policy
+// TODO: Double check with your own queue performance
+struct FifoQueues {
+    small: VecDeque<u64>,
+    small_weight: u16,
+
+    main: VecDeque<u64>,
+    main_weight: u16,
+}
 
 /// TinyLFU cache
 /// paper: https://arxiv.org/pdf/1512.00727.pdf
