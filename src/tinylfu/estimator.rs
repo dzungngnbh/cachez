@@ -1,9 +1,11 @@
 use std::cmp;
 use std::cmp::max;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::{AtomicU8, AtomicUsize};
 use t1ha::T1haHasher;
+
+use crate::tinylfu::types::Key;
 
 /// Stores estimated frequency of items in the cache.
 ///
@@ -12,7 +14,7 @@ use t1ha::T1haHasher;
 #[derive(Debug)]
 pub struct Estimator {
     /// The number of hash funct
-    inner: Vec<(Vec<AtomicU8>, u64)>,
+    inner: Vec<(Vec<AtomicU8>, Key)>,
 }
 
 impl Estimator {
@@ -33,6 +35,7 @@ impl Estimator {
         (w, d)
     }
 
+    /// Create a new Count-Min Sketch with `hashes` hash functions and `slots` slots
     pub fn new(hashes: usize, slots: usize) -> Self {
         let mut inner = Vec::with_capacity(hashes);
         for _ in 0..hashes {
@@ -55,7 +58,7 @@ impl Estimator {
             key.hash(&mut hasher);
             let hash = hasher.finish() as usize % slot.len();
             let current = &slot[hash];
-            let value = current.load(atomic::Ordering::Relaxed);
+            let value = current.load(Relaxed);
             min = cmp::min(min, value);
         }
         min
@@ -81,29 +84,56 @@ impl Estimator {
     pub fn age(&mut self, shift: u8) {
         for (slot, _) in &self.inner {
             for counter in slot {
-                let value = counter.load(atomic::Ordering::Relaxed);
-                counter.store(value >> shift, atomic::Ordering::Relaxed);
+                let value = counter.load(Relaxed);
+                counter.store(value >> shift, Relaxed);
             }
         }
     }
 
     /// Increment the frequency of the key without overflowing
     fn incr_no_overflow(counter: &AtomicU8) -> u8 {
-        let mut value = counter.load(atomic::Ordering::Relaxed);
+        let mut value = counter.load(Relaxed);
         loop {
             if value == u8::MAX {
                 return value;
             }
-            match counter.compare_exchange_weak(
-                value,
-                value + 1,
-                atomic::Ordering::Acquire,
-                atomic::Ordering::Relaxed,
-            ) {
+            match counter.compare_exchange_weak(value, value + 1, Acquire, Relaxed) {
                 Ok(_) => return value,
                 Err(val) => value = val,
             }
         }
+    }
+}
+
+/// No doorkeeper LFU
+struct TinyLFU {
+    estimator: Estimator,
+    window_counter: AtomicUsize,
+    window_limit: usize,
+}
+
+impl TinyLFU {
+    pub fn new(cache_size: usize) -> Self {
+        let estimator = Estimator::new_optimal(cache_size);
+        Self {
+            window_counter: Default::default(),
+            window_limit: cache_size * 8, // heuristic
+            estimator,
+        }
+    }
+
+    pub fn get(&mut self, key: Key) -> u8 {
+        self.estimator.get(key)
+    }
+
+    pub fn incr(&mut self, key: Key) -> u8 {
+        let current_window_counter = self.window_counter.fetch_add(1, Relaxed);
+        if current_window_counter >= self.window_limit {
+            // reset the counter and age the estimator
+            self.window_counter.store(0, Relaxed);
+            self.estimator.age(1);
+        }
+        self.estimator.incr(key)
     }
 }
 
@@ -115,15 +145,23 @@ mod tests {
     fn test_optimal_params() {
         let (slots, hashes) = Estimator::optimal_params(1_000_000);
         // just smoke check some standard input
-        assert_eq!(slots, 2718280);
+        assert_eq!(slots, 2718282);
         assert_eq!(hashes, 20);
     }
 
     #[test]
-    fn test_sanity() {
+    fn test_sanity_estimator() {
         let mut estimator = Estimator::new_optimal(64);
         assert_eq!(estimator.get(1), 0);
         estimator.incr(1);
         assert_eq!(estimator.get(1), 1);
+    }
+
+    #[test]
+    fn test_sanity_tinylfu() {
+        let mut lfu = TinyLFU::new(64);
+        assert_eq!(lfu.get(1), 0);
+        lfu.incr(1);
+        assert_eq!(lfu.get(1), 1);
     }
 }
