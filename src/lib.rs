@@ -1,2 +1,2 @@
 mod s3fifo;
-mod tinylfu;
+mod tinyufo;
